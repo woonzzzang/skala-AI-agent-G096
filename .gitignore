@@ -1,0 +1,44 @@
+# Secrets and local environment files
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python caches and tooling
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local runtime state
+session.db
+session.db-*
+*.sqlite
+*.sqlite3
+*.log
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+
+# IDE and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.swp
+*~
