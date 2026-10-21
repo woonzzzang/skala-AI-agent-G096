@@ -58,6 +58,7 @@ class AgentState(TypedDict, total=False):
     target_systems: list[str]
     target_status: str
     target_reason: str
+    clarification_question: str
 
     tasks: list[dict]
     gate_removed: int
@@ -117,11 +118,24 @@ async def resolve_target_node(
         elif len(validated_targets) != len(raw_targets):
             target_status = "unknown"
 
+    event = {
+        "type": "TargetResolution",
+        "status": target_status,
+        "targets": validated_targets,
+    }
+
     return {
         "target_systems": validated_targets,
         "target_status": target_status,
         "target_reason": result.get("reason", ""),
+        "clarification_question": (
+            ""
+            if target_status == "resolved"
+            else result.get("clarification_question")
+            or "어느 시스템을 조사할까요?"
+        ),
         "cost_usd": _cost(state, usage),
+        "events": state.get("events", []) + [event],
     }
 
 
