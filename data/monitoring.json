@@ -1,35 +1,41 @@
 {
   "auth-service": {
+    "description": "로그인과 사용자 인증을 처리하는 서비스",
     "status": "degraded",
     "cpu_base": 78.0,
     "memory_base": 61.0,
     "alerts": ["p95 latency 2.4s (threshold 1.0s)", "connection pool 92% used"]
   },
   "web-01": {
+    "description": "웹 애플리케이션 서버",
     "status": "healthy",
     "cpu_base": 34.0,
     "memory_base": 48.0,
     "alerts": []
   },
   "payments-service": {
+    "description": "결제 요청과 승인을 처리하는 서비스",
     "status": "degraded",
     "cpu_base": 91.0,
     "memory_base": 55.0,
     "alerts": ["CPU 91% (threshold 80%)", "payments-service-3 instance responding slow"]
   },
   "cache-service": {
+    "description": "공통 캐시 서비스",
     "status": "degraded",
     "cpu_base": 42.0,
     "memory_base": 89.0,
     "alerts": ["memory usage climbing steadily over 6h", "heap near limit"]
   },
   "gateway-service": {
+    "description": "외부 요청을 내부 서비스로 전달하는 게이트웨이",
     "status": "degraded",
     "cpu_base": 30.0,
     "memory_base": 45.0,
     "alerts": ["upstream timeout to payments-service (504)", "network packet loss 3%"]
   },
   "log-service": {
+    "description": "애플리케이션 로그를 수집하는 서비스",
     "status": "degraded",
     "cpu_base": 20.0,
     "memory_base": 35.0,

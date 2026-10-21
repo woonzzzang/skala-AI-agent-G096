@@ -21,6 +21,7 @@ from langsmith import traceable
 
 from .deps import SupervisorDeps
 from .retry import with_retry
+from .system_registry import SystemRegistry
 
 
 def _load_known_systems() -> set[str]:
@@ -53,6 +54,11 @@ class AgentState(TypedDict, total=False):
     history: list[dict]
     route: str
     needs_analysis: bool
+
+    target_systems: list[str]
+    target_status: str
+    target_reason: str
+
     tasks: list[dict]
     gate_removed: int
     collected: list[dict]
@@ -80,6 +86,43 @@ async def route_node(state: AgentState, deps: SupervisorDeps) -> dict:
     return {"route": result["route"], "needs_analysis": result["needs_analysis"],
             "cost_usd": _cost(state, usage),
             "events": state.get("events", []) + [event]}
+
+@traceable(name="resolve_target_node")
+async def resolve_target_node(
+    state: AgentState,
+    deps: SupervisorDeps,
+) -> dict:
+    # 노드가 실행될 때 monitoring.json을 새로 읽음
+    # graph.py 최상단에 넣으면 서버 시작될 때 한 번만 읽음
+    registry = SystemRegistry()
+
+    # LLM에 전달할 시스템명과 설명 생성
+    catalog = registry.to_prompt_catalog()
+
+    # 현재 프로젝트에서는 llm이 아니라 deps.fast_llm 사용
+    result, usage = deps.fast_llm.resolve_target(
+        query=state["query"],
+        systems=catalog,
+    )
+
+    # LLM이 반환한 시스템이 실제 monitoring.json에 있는지 검사
+    raw_targets = result.get("target_systems", [])
+    validated_targets = registry.validate_candidates(raw_targets)
+
+    # LLM의 판단과 Registry 검증 결과가 모순되지 않도록 보정
+    target_status = result.get("status", "missing")
+    if target_status == "resolved":
+        if not raw_targets:
+            target_status = "missing"
+        elif len(validated_targets) != len(raw_targets):
+            target_status = "unknown"
+
+    return {
+        "target_systems": validated_targets,
+        "target_status": target_status,
+        "target_reason": result.get("reason", ""),
+        "cost_usd": _cost(state, usage),
+    }
 
 
 @traceable(name="chat_answer_node")

@@ -30,6 +30,79 @@ class FastLLM(FakeLLM):
         result = {"route": "incident" if incident else "chat", "needs_analysis": False}
         return result, self._usage(query, str(result))
 
+    @traceable(
+            run_type="llm",
+            name="fast_llm.resolve_target",
+    )
+    def resolve_target(
+        self,
+        query: str,
+        systems: list[dict],
+    ) -> tuple[dict, dict]:
+        """
+        테스트용 대상 시스템 판별, 자연어 의미 추론은 실제 LLM이 담당
+        """
+        known = {
+            item["name"].casefold(): item["name"]
+            for item in systems
+            if isinstance(item.get("name"), str)
+        }
+        normalized_query = query.casefold()
+
+        # 1. 사용자가 등록된 시스템명을 직접 입력한 경우 확인 
+        explicit_targets = [
+            original_name
+            for normalized_name, original_name in known.items()
+            if re.search(
+                rf"(?<![a-z0-9_-]){re.escape(normalized_name)}(?![a-z0-9_-])",
+                normalized_query,
+            )
+        ]
+
+        # 2. 사용자가 미등록 시스템명을 직접 입력한 경우 확인 
+        mentioned_systems = re.findall(
+            r"(?<![a-z0-9_-])[a-z][a-z0-9-]+-(?:service|\d+)(?![a-z0-9-])",
+            normalized_query,
+        )
+
+        unknown_names = [
+            name
+            for name in dict.fromkeys(mentioned_systems)
+            if name not in known
+        ]
+
+        if unknown_names:
+            result = {
+                "status": "unknown",
+                "target_systems": [],
+                "candidates": unknown_names,
+                "reason": "사용자가 언급한 시스템이 등록된 시스템 목록에 없습니다.",
+                "clarification_question": (
+                    "해당 시스템은 현재 조회할 수 없습니다. "
+                    "조회할 다른 시스템명을 알려주세요."
+                ),
+            }
+        elif explicit_targets:
+            result = {
+                "status": "resolved",
+                "target_systems": explicit_targets,
+                "candidates": [],
+                "reason": "등록된 시스템명을 직접 명시했습니다.",
+                "clarification_question": "",
+            }
+        else:
+            result = {
+                "status": "missing",
+                "target_systems": [],
+                "candidates": [],
+                "reason": "질문에서 대상 시스템을 특정할 수 없습니다.",
+                "clarification_question": "어느 시스템에 관한 문제인지 좀 더 자세히 알려주세요.",
+            }
+
+        return result, self._usage(query + str(systems), str(result))
+
+        
+
     @traceable(run_type="llm", name="fast_llm.plan")
     def plan(self, query: str, procedure_prompt: str) -> tuple[dict, dict]:
         """Wave 4 — Plan/Task 분해. MCP Prompt가 준 표준 절차를 따라 계획을 세운다.
