@@ -170,8 +170,9 @@ async def replan_check_node(state: AgentState, deps: SupervisorDeps) -> dict:
         verdict = {"type": "ReplanCheck", "round": rounds, "is_sufficient": True,
                    "runbook_found": found}
         return {"events": state["events"] + [verdict]}
+    retriever = deps.runbook_retriever or RunbookRetriever()
     try:
-        matches, usage = RunbookRetriever().search(
+        matches, usage = retriever.search(
             state["query"], state.get("collected", []), deps.fast_llm)
         search_status = "matched" if matches else "no_match"
         error = ""
@@ -184,6 +185,8 @@ async def replan_check_node(state: AgentState, deps: SupervisorDeps) -> dict:
         for match in matches
     ]
     events = state["events"] + [{"type": "RunbookSearch", "status": search_status,
+                                  "method": retriever.mode,
+                                  "embedding_requests": usage.get("requests", 0),
                                   "matches": matches, "error": error},
                                  {"type": "ReplanCheck", "round": rounds,
                                   "is_sufficient": not bool(gap_tasks)}]

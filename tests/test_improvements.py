@@ -56,11 +56,29 @@ class RejectingQuality(QualityLLM):
         return {"passed": False, "issues": ["반려"], "feedback": "반려"}, {"usd": 0}
 
 
-def make_graph(mcp=None, quality=None):
+class StubEmbedder:
+    """Tiny deterministic vectors; tests retrieval wiring, not model quality."""
+
+    def __init__(self):
+        self.calls = []
+
+    def embed(self, texts):
+        self.calls.append(list(texts))
+        vectors = []
+        for text in texts:
+            lowered = text.lower()
+            vector = [float("cpu" in lowered),
+                      float("timeout" in lowered or "packet loss" in lowered),
+                      float("disk" in lowered)]
+            vectors.append(vector if any(vector) else [0.0, 0.0, 1.0])
+        return vectors, {"tokens": len(texts), "usd": 0.0, "requests": 1}
+
+
+def make_graph(mcp=None, quality=None, retriever=None):
     mcp = mcp or StubMCP()
     deps = SupervisorDeps(FastLLM("fake-fast", 0.00015),
                           quality or QualityLLM("fake-quality", 0.005),
-                          mcp, None, "v2")
+                          mcp, None, "v2", retriever)
     return build_graph(deps, InMemorySaver()), mcp
 
 
@@ -71,6 +89,47 @@ def invoke(graph, query, thread):
 
 
 class ImprovementTests(unittest.TestCase):
+    def test_embedding_search_caches_documents_and_handles_changes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            (directory / "cpu.md").write_text("CPU spike", encoding="utf-8")
+            (directory / "network.md").write_text("network timeout", encoding="utf-8")
+            embedder = StubEmbedder()
+            retriever = RunbookRetriever(directory=directory, embedder=embedder)
+            first, usage = retriever.search("CPU timeout", [], None)
+            self.assertEqual({item["id"] for item in first}, {"cpu", "network"})
+            self.assertEqual(usage["requests"], 2)  # 문서 배치 + 질문
+            self.assertEqual(len(embedder.calls[0]), 2)
+
+            again, usage = retriever.search("CPU timeout", [], None)
+            self.assertEqual({item["id"] for item in again}, {"cpu", "network"})
+            self.assertEqual(usage["requests"], 1)  # 질문만 새로 임베딩
+
+            (directory / "cpu.md").write_text("disk full", encoding="utf-8")
+            changed, usage = retriever.search("CPU timeout", [], None)
+            self.assertEqual([item["id"] for item in changed], ["network"])
+            self.assertEqual(usage["requests"], 2)
+            self.assertEqual(embedder.calls[-2], ["disk full"])
+
+    def test_graph_uses_embedding_matches_for_mcp_resource_tasks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            (directory / "cpu-spike.md").write_text("CPU spike", encoding="utf-8")
+            (directory / "network-timeout.md").write_text("network timeout", encoding="utf-8")
+            retriever = RunbookRetriever(directory=directory, embedder=StubEmbedder())
+            graph, _ = make_graph(retriever=retriever)
+            result = invoke(graph, "payments-service와 gateway-service CPU 급증 및 timeout 장애",
+                            "embedding-graph-test")
+            self.assertEqual({item["id"] for item in result["runbook_matches"]},
+                             {"cpu-spike", "network-timeout"})
+            self.assertTrue({"cpu-spike", "network-timeout"}.issubset(
+                {item["id"] for item in result["collected"]
+                 if item["source"] == "runbook"}))
+            event = next(item for item in result["events"]
+                         if item["type"] == "RunbookSearch")
+            self.assertEqual(event["method"], "embedding")
+            self.assertEqual(event["embedding_requests"], 2)
+
     def test_registry_and_natural_language(self):
         fast = FastLLM("fake", 0)
         catalog = SystemRegistry().to_prompt_catalog()

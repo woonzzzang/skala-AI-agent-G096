@@ -31,6 +31,7 @@ from agent.deps import SupervisorDeps
 from agent.fake_llm import FastLLM, QualityLLM
 from agent.graph import build_graph
 from agent.mcp_client import MCPClient
+from agent.runbook_retrieval import RunbookRetriever
 from agent.session_store import SqliteSessionStore
 from agent.supervisor_v1 import run_v1
 
@@ -69,16 +70,34 @@ def _build_llms():
 async def lifespan(app: FastAPI):
     global CREATION_COUNT
     CREATION_COUNT += 1
+    backend, fast_llm, quality_llm = _build_llms()
+    search_mode = os.environ.get(
+        "RUNBOOK_SEARCH_MODE", "embedding" if backend == "openai" else "llm")
+    if search_mode not in {"embedding", "llm"}:
+        raise ValueError("RUNBOOK_SEARCH_MODE는 embedding 또는 llm이어야 합니다.")
+    embedder = None
+    if search_mode == "embedding":
+        if backend == "openai":
+            from agent.embeddings import OpenAIEmbedder
+            embedder = OpenAIEmbedder(os.environ.get(
+                "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"))
+        elif backend == "ollama":
+            from agent.embeddings import OllamaEmbedder
+            embedder = OllamaEmbedder(os.environ.get(
+                "OLLAMA_EMBEDDING_MODEL", "embeddinggemma"))
+        else:
+            raise ValueError("Fake 백엔드는 실제 임베딩을 제공하지 않습니다.")
     mcp = MCPClient()
     await mcp.start()   # Wave 2 — MCP subprocess는 서버 수명 동안 딱 1개
-    backend, fast_llm, quality_llm = _build_llms()
     app.state.llm_backend = backend
+    app.state.runbook_search_mode = search_mode
     deps = SupervisorDeps(
         fast_llm=fast_llm,
         quality_llm=quality_llm,
         mcp=mcp,
         session_store=SqliteSessionStore(),
         version=os.environ.get("SUPERVISOR_VERSION", "v2"),
+        runbook_retriever=RunbookRetriever(embedder=embedder),
     )
     app.state.deps = deps
     checkpoint_path = Path(__file__).resolve().parent / "data" / "agent_checkpoints.sqlite"
@@ -107,6 +126,7 @@ async def health():
             "creation_count": CREATION_COUNT,
             "supervisor_version": app.state.deps.version,
             "llm_backend": app.state.llm_backend,
+            "runbook_search_mode": app.state.runbook_search_mode,
             "fast_llm": app.state.deps.fast_llm.name,
             "quality_llm": app.state.deps.quality_llm.name}
 
