@@ -1,0 +1,100 @@
+{
+  "baseline_commit": "2c6ad9a",
+  "backend": "fake",
+  "monitoring_fixture": "tests.test_improvements.StubMCP",
+  "cases": [
+    {
+      "case": "natural-language",
+      "query": "로그인 응답이 느려요",
+      "before": {
+        "route": "chat",
+        "target_status": null,
+        "monitoring_calls": [],
+        "runbooks": [],
+        "validation_attempts": 0,
+        "interrupted": false,
+        "elapsed_ms": 3.5,
+        "estimated_cost_usd": 3e-06
+      },
+      "after": {
+        "route": "incident",
+        "target_status": "resolved",
+        "monitoring_calls": [
+          "auth-service"
+        ],
+        "runbooks": [
+          "high-latency"
+        ],
+        "validation_attempts": 2,
+        "interrupted": false,
+        "elapsed_ms": 9.2,
+        "estimated_cost_usd": 0.002918
+      }
+    },
+    {
+      "case": "multi-symptom",
+      "query": "payments-service와 gateway-service CPU 급증 및 timeout 장애",
+      "before": {
+        "route": "incident",
+        "target_status": null,
+        "monitoring_calls": [
+          "payments-service",
+          "gateway-service",
+          "web-01"
+        ],
+        "runbooks": [
+          "# Runbook: CPU 급증 대응 절차"
+        ],
+        "validation_attempts": 2,
+        "interrupted": false,
+        "elapsed_ms": 719.8,
+        "estimated_cost_usd": 0.000734
+      },
+      "after": {
+        "route": "incident",
+        "target_status": "resolved",
+        "monitoring_calls": [
+          "payments-service",
+          "gateway-service"
+        ],
+        "runbooks": [
+          "cpu-spike",
+          "network-timeout"
+        ],
+        "validation_attempts": 2,
+        "interrupted": false,
+        "elapsed_ms": 15.4,
+        "estimated_cost_usd": 0.005065
+      }
+    },
+    {
+      "case": "unknown-target",
+      "query": "billing-service 장애 원인 확인해줘",
+      "before": {
+        "route": "incident",
+        "target_status": null,
+        "monitoring_calls": [
+          "billing-service",
+          "web-01"
+        ],
+        "runbooks": [
+          "# Runbook: DB Down 대응 절차"
+        ],
+        "validation_attempts": 2,
+        "interrupted": false,
+        "elapsed_ms": 724.9,
+        "estimated_cost_usd": 0.000533
+      },
+      "after": {
+        "route": "incident",
+        "target_status": "unknown",
+        "monitoring_calls": [],
+        "runbooks": [],
+        "validation_attempts": 0,
+        "interrupted": true,
+        "elapsed_ms": 4.8,
+        "estimated_cost_usd": 2.5e-05
+      }
+    }
+  ]
+}

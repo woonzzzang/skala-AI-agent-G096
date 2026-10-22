@@ -8,6 +8,8 @@ import re
 
 from langsmith import traceable
 
+from .task_planner import normalize_plan
+
 
 class FakeLLM:
     def __init__(self, name: str, usd_per_1k_tokens: float):
@@ -26,7 +28,9 @@ class FastLLM(FakeLLM):
     @traceable(run_type="llm", name="fast_llm.route")
     def route(self, query: str) -> tuple[dict, dict]:
         """Wave 5 — 쿼리 라우팅. 장애 관련이면 incident 파이프라인, 아니면 chat 직행."""
-        incident = bool(re.search(r"장애|진단|다운|지연|급증|incident|티켓", query))
+        incident = bool(re.search(
+            r"장애|진단|다운|지연|급증|오류|실패|incident|티켓|로그인.*(느|안)|서비스.*(느|안)|시스템.*(느|안)|결제.*(느|안)",
+            query, re.IGNORECASE))
         result = {"route": "incident" if incident else "chat", "needs_analysis": False}
         return result, self._usage(query, str(result))
 
@@ -71,6 +75,28 @@ class FastLLM(FakeLLM):
             if name not in known
         ]
 
+        # Fake backend only: use rare character pairs in descriptions as a
+        # deterministic stand-in for semantic inference (no fixed stop-word list).
+        def grams(text: str) -> set[str]:
+            words = re.findall(r"[가-힣a-z0-9]+", text.casefold())
+            return {word[index:index + width]
+                    for word in words for width in (2, 3, 4)
+                    for index in range(len(word) - width + 1)}
+
+        descriptions = {
+            item["name"]: grams(item.get("description", ""))
+            for item in systems if isinstance(item.get("name"), str)
+        }
+        query_pairs = grams(normalized_query)
+        scores = {
+            name: sum(
+                1 for pair in (pairs & query_pairs)
+                if sum(pair in other for other in descriptions.values()) == 1)
+            for name, pairs in descriptions.items()
+        }
+        best = max(scores.values(), default=0)
+        inferred = [name for name, score in scores.items() if score == best] if best else []
+
         if unknown_names:
             result = {
                 "status": "unknown",
@@ -90,6 +116,19 @@ class FastLLM(FakeLLM):
                 "reason": "등록된 시스템명을 직접 명시했습니다.",
                 "clarification_question": "",
             }
+        elif len(inferred) == 1:
+            result = {
+                "status": "resolved", "target_systems": inferred,
+                "candidates": [], "reason": "등록된 시스템 설명과 표현이 일치합니다.",
+                "clarification_question": "",
+            }
+        elif len(inferred) > 1:
+            result = {
+                "status": "ambiguous", "target_systems": [],
+                "candidates": inferred,
+                "reason": "여러 시스템 설명과 일치해 하나로 확정할 수 없습니다.",
+                "clarification_question": "어느 시스템을 조사할까요?",
+            }
         else:
             result = {
                 "status": "missing",
@@ -104,24 +143,38 @@ class FastLLM(FakeLLM):
         
 
     @traceable(run_type="llm", name="fast_llm.plan")
-    def plan(self, query: str, procedure_prompt: str) -> tuple[dict, dict]:
+    def plan(self, query: str, procedure_prompt: str,
+             targets: list[str]) -> tuple[dict, dict]:
         """Wave 4 — Plan/Task 분해. MCP Prompt가 준 표준 절차를 따라 계획을 세운다.
 
         Wave 6 재현: needs_analysis=False라고 스스로 판단해 놓고도 analysis task를
         끼워 넣는 '모델의 자기모순'을 결정론적으로 재현한다 → gate 노드가 걸러낸다.
         """
-        systems = re.findall(r"[a-z][a-z0-9-]+-(?:service|\d+)", query) or ["auth-service"]
-        if "web-01" not in systems:
-            systems.append("web-01")   # 연관 시스템 비교 조회 → Wave 10b 병렬 실행 대상
-        tasks = [
-            {"id": f"task-{i}", "agent": "research", "kind": "monitoring",
-             "target": s, "status": "pending"}
-            for i, s in enumerate(dict.fromkeys(systems))
-        ]
-        tasks.append({"id": "task-analysis", "agent": "analysis",
-                      "kind": "pattern-analysis", "status": "pending"})   # 자기모순 task
-        result = {"needs_analysis": False, "tasks": tasks}
+        result = normalize_plan(
+            {"needs_analysis": False, "tasks": [{"agent": "analysis"}]}, targets)
         return result, self._usage(query + procedure_prompt, str(result))
+
+    @traceable(run_type="llm", name="fast_llm.rank_runbooks")
+    def rank_runbooks(self, query: str, documents: list[dict]) -> tuple[dict, dict]:
+        """Deterministic lexical test double; real backends do semantic ranking."""
+        def terms(text: str) -> set[str]:
+            return set(re.findall(r"[a-z0-9]+|[가-힣]{2,}", text.casefold()))
+
+        query_terms = terms(query)
+        doc_terms = {d["id"]: terms(d["id"] + " " + d["title"] + " " + d["excerpt"])
+                     for d in documents}
+        matches = []
+        for document in documents:
+            doc_id = document["id"]
+            distinctive = {term for term in doc_terms[doc_id]
+                           if sum(term in other for other in doc_terms.values()) == 1}
+            overlap = distinctive & query_terms
+            if overlap:
+                matches.append({"id": doc_id,
+                                "score": round(min(1.0, 0.55 + 0.1 * len(overlap)), 2),
+                                "reason": "일치 표현: " + ", ".join(sorted(overlap))})
+        result = {"matches": matches}
+        return result, self._usage(query + str(documents), str(result))
 
     @traceable(run_type="llm", name="fast_llm.analyze")
     def analyze(self, collected: list[dict]) -> tuple[str, dict]:
@@ -177,22 +230,40 @@ class QualityLLM(FakeLLM):
                 on_token(draft)
             return draft, self._usage(query, draft)
 
-        mon = [c for c in collected if c["source"] == "monitoring"]
+        mon = [c["data"] for c in collected if c["source"] == "monitoring"]
         run = [c for c in collected if c["source"] == "runbook"]
-        summary = " · ".join(
-            f"{c['data']['system_name']} 상태={c['data']['status']}, "
-            f"CPU {c['data']['cpu_percent']}% (알림 {len(c['data']['alerts'])}건)"
-            for c in mon)
-        lines = [f"'{query}' 진단 결과:", f"1) 모니터링: {summary}"]
-        if run:
-            body_lines = [l.strip() for l in run[0]["data"].strip().splitlines() if l.strip()]
-            title = body_lines[0].lstrip("# ")
-            steps = [m.group(1) for l in body_lines[1:]
-                     if (m := re.match(r"^\d+\.\s+(.*)", l))]
-            advice = " ".join(steps[1:3]) or "표준 절차를 따라 조치하세요."
-            lines.append(f"2) 표준 절차: '{title}'에 따라 {advice}")
-        lines.append("3) 정상화 확인 후 원인 분석과 재발 방지 대책을 문서화하세요.")
-        draft = " ".join(lines)
+        failures = [c["data"] for c in collected if c["source"] == "failure"]
+        lines = ["확인된 사실"]
+        lines.extend(
+            f"- {d['system_name']}: 상태 {d['status']}, CPU {d['cpu_percent']}%, "
+            f"메모리 {d['memory_percent']}%, 알림 {len(d['alerts'])}건 "
+            f"(조회: {d.get('last_checked', '시각 미상')})"
+            for d in mon)
+        if not mon:
+            lines.append("- 확인된 모니터링 결과가 없습니다.")
+        lines.extend(["원인 추정", "- 관련 Runbook을 참고해 원인을 추가 확인해야 합니다.",
+                      "권장 조치"])
+        lines.extend(f"- Runbook {c['id']}: 문서의 진단 절차를 확인하고 조치하세요."
+                     for c in run)
+        if not run:
+            lines.append("- 관련 Runbook을 찾지 못해 일반적인 원인 단정은 보류합니다.")
+        lines.extend(["진단 한계"])
+        lines.extend(f"- {d['target']} {d['kind']} 조회 실패: {d['error']}"
+                     for d in failures)
+        if not failures:
+            lines.append("- 조회 실패는 없습니다. 조치 전 실제 환경에서 재확인하세요.")
+        draft = "\n".join(lines)
         if on_token is not None:
             on_token(draft)
         return draft, self._usage(query + str(feedback), draft)
+
+    @traceable(run_type="llm", name="quality_llm.judge")
+    def judge(self, draft: str, evidence: dict) -> tuple[dict, dict]:
+        """Deterministic test double; real providers use an LLM judge."""
+        from .answer_validation import grounded_issues
+        issues = grounded_issues(draft, evidence)
+        if "원인 추정" in draft and "단정" not in draft and not evidence["runbooks"]:
+            issues.append("근거 없는 원인 단정을 피해야 합니다.")
+        result = {"passed": not issues, "issues": issues,
+                  "feedback": " ".join(issues)}
+        return result, self._usage(draft + str(evidence), str(result))

@@ -47,12 +47,14 @@ async def proxy_chat(req: Request):
 
 
 @app.get("/chat/stream")
-async def proxy_stream(message: str, thread_id: str = "web-demo"):
+async def proxy_stream(message: str, thread_id: str = "web-demo",
+                       graph_thread_id: str | None = None):
     async def relay():
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream(
                 "GET", f"{BACKEND}/chat/stream",
-                params={"message": message, "thread_id": thread_id},
+                params={"message": message, "thread_id": thread_id,
+                        **({"graph_thread_id": graph_thread_id} if graph_thread_id else {})},
             ) as upstream:
                 async for chunk in upstream.aiter_bytes():
                     yield chunk
