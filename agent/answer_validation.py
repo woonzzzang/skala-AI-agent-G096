@@ -47,9 +47,17 @@ def grounded_issues(draft: str, evidence: dict[str, Any]) -> list[str]:
     for value in MEASURE.findall(draft):
         if value.replace(" ", "") not in allowed:
             issues.append(f"근거에 없는 수치 {value}가 포함됐습니다.")
-    for runbook in evidence["runbooks"]:
-        if runbook["id"] and runbook["id"] not in draft:
-            issues.append(f"참고한 Runbook {runbook['id']} 출처가 빠졌습니다.")
+    # Retrieval can return a document that the monitoring evidence cannot
+    # justify using (for example, a CPU runbook when that system's lookup
+    # failed). Require a source for the recommended action, not a citation to
+    # every retrieved document.
+    runbook_ids = [item["id"] for item in evidence["runbooks"] if item.get("id")]
+    actions = draft.split("권장 조치", 1)[-1].split("진단 한계", 1)[0]
+    if runbook_ids and not any(doc_id in actions for doc_id in runbook_ids):
+        if len(runbook_ids) == 1:
+            issues.append(f"참고한 Runbook {runbook_ids[0]} 출처가 빠졌습니다.")
+        else:
+            issues.append("권장 조치에 사용한 Runbook 출처가 빠졌습니다.")
     return list(dict.fromkeys(issues))
 
 

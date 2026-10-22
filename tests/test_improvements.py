@@ -13,6 +13,8 @@ from agent.answer_validation import grounded_issues, validate_report
 from agent.deps import SupervisorDeps
 from agent.fake_llm import FastLLM, QualityLLM
 from agent.graph import build_graph
+from agent.ollama_llm import OllamaQualityLLM
+from agent.openai_llm import OpenAIQualityLLM
 from agent.runbook_retrieval import RunbookRetriever
 from agent.system_registry import SystemRegistry
 
@@ -193,6 +195,47 @@ class ImprovementTests(unittest.TestCase):
         self.assertTrue(any(event["type"] == "TaskFailed" for event in result["events"]))
         self.assertIn("payments-service", result["final"])
         self.assertIn("실패", result["final"])
+        self.assertIn("upstream timeout", result["final"])
+        self.assertIn("반복 호출, 배치 작업 중복 실행", result["final"])
+        self.assertIn("DNS 해석 실패, 방화벽/보안그룹 변경", result["final"])
+        self.assertNotIn("문서의 진단 절차를 확인하고 조치하세요", result["final"])
+        self.assertNotIn("CPU가 90%를 넘고 지속되면", result["final"])
+
+    def test_fake_writer_uses_retrieved_runbook_text_not_canned_steps(self):
+        quality = QualityLLM("fake", 0)
+        document = {"source": "runbook", "id": "example", "data":
+                    "# Example\n1. 첫 번째 맞춤 점검을 수행한다.\n"
+                    "2. 두 번째 맞춤 점검을 수행한다.\n"}
+        draft, _ = asyncio.run(quality.write("점검", [document], 2, None))
+        self.assertIn("Runbook example", draft)
+        self.assertIn("첫 번째 맞춤 점검", draft)
+        self.assertIn("두 번째 맞춤 점검", draft)
+
+    def test_real_backend_prompts_include_runbook_procedures_offline(self):
+        document = {"source": "runbook", "id": "network-timeout", "data":
+                    "# Runbook\n1. DNS와 로드밸런서를 점검한다.\n"}
+        captured = []
+
+        def capture_openai(system, user, **kwargs):
+            captured.append((system, user))
+            return "draft", {"tokens": 0, "usd": 0.0}
+
+        openai = OpenAIQualityLLM("offline-test", 0)
+        openai._chat = capture_openai
+        asyncio.run(openai.write("timeout 장애", [document], 2, None))
+
+        async def capture_ollama(system, user, on_token=None):
+            captured.append((system, user))
+            return "draft", {"tokens": 0, "usd": 0.0}
+
+        ollama = OllamaQualityLLM("offline-test", 0)
+        ollama._chat_stream = capture_ollama
+        asyncio.run(ollama.write("timeout 장애", [document], 2, None))
+
+        for system, user in captured:
+            self.assertIn("구체적인 점검 절차", system)
+            self.assertIn("Runbook network-timeout", user)
+            self.assertIn("DNS와 로드밸런서를 점검한다", user)
 
     def test_never_force_pass(self):
         graph, _ = make_graph(quality=RejectingQuality("reject", 0))
@@ -214,6 +257,22 @@ class ImprovementTests(unittest.TestCase):
         self.assertTrue(any("high-latency" in issue for issue in issues))
         verdict, _ = validate_report(draft, evidence, QualityLLM("fake", 0))
         self.assertFalse(verdict["passed"])
+
+    def test_unused_retrieved_runbook_is_not_forced_into_report(self):
+        evidence = {"target_systems": ["payments-service", "gateway-service"],
+                    "monitoring": [{"system_name": "gateway-service",
+                                    "cpu_percent": 30.0, "alerts": ["upstream timeout"]}],
+                    "runbooks": [{"id": "cpu-spike", "text": "# CPU 점검"},
+                                 {"id": "network-timeout", "text": "# 네트워크 점검"}],
+                    "failed_tasks": [{"kind": "monitoring", "target":
+                                      "payments-service", "error": "조회 실패"}]}
+        draft = ("확인된 사실\n- gateway-service CPU 30.0%\n"
+                 "원인 추정\n- payments-service 상태는 미확인\n"
+                 "권장 조치\n- Runbook network-timeout: 네트워크 경로를 점검\n"
+                 "진단 한계\n- payments-service monitoring 조회 실패")
+        issues = grounded_issues(draft, evidence)
+        self.assertFalse(any("cpu-spike" in issue for issue in issues))
+        self.assertFalse(any("Runbook 출처" in issue for issue in issues))
 
 
 if __name__ == "__main__":

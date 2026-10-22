@@ -216,6 +216,11 @@ class FastLLM(FakeLLM):
 class QualityLLM(FakeLLM):
     """최종 답변 작성 전담 (고품질·고비용)."""
 
+    @staticmethod
+    def _runbook_steps(text: str, limit: int = 2) -> list[tuple[str, str]]:
+        """Use steps from the retrieved Resource, not canned advice."""
+        return re.findall(r"^\s*(\d+)\.\s+(.+)$", text, re.MULTILINE)[:limit]
+
     @traceable(run_type="llm", name="quality_llm.write")
     async def write(self, query: str, collected: list[dict], attempt: int,
               feedback: str | None, on_token=None) -> tuple[str, dict]:
@@ -239,12 +244,21 @@ class QualityLLM(FakeLLM):
             f"메모리 {d['memory_percent']}%, 알림 {len(d['alerts'])}건 "
             f"(조회: {d.get('last_checked', '시각 미상')})"
             for d in mon)
+        lines.extend(f"  - {alert}" for d in mon for alert in d.get("alerts", []))
         if not mon:
             lines.append("- 확인된 모니터링 결과가 없습니다.")
-        lines.extend(["원인 추정", "- 관련 Runbook을 참고해 원인을 추가 확인해야 합니다.",
-                      "권장 조치"])
-        lines.extend(f"- Runbook {c['id']}: 문서의 진단 절차를 확인하고 조치하세요."
-                     for c in run)
+        lines.extend(["원인 추정", "- 모니터링 알림만으로 원인을 확정할 수 없습니다."
+                      " 아래 Runbook 절차로 확인이 필요합니다.", "권장 조치"])
+        lines.extend(
+            f"- {d['target']} 조회 실패를 먼저 해결하고 지표를 확인한 뒤 조치를 결정하세요."
+            for d in failures)
+        for document in run:
+            lines.append(f"- Runbook {document['id']}의 점검 절차 (아직 수행하지 않음):")
+            steps = self._runbook_steps(str(document["data"]))
+            if steps:
+                lines.extend(f"  {number}) {step}" for number, step in steps)
+            else:
+                lines.append("  - 원문에서 번호가 붙은 절차를 찾지 못했습니다.")
         if not run:
             lines.append("- 관련 Runbook을 찾지 못해 일반적인 원인 단정은 보류합니다.")
         lines.extend(["진단 한계"])
